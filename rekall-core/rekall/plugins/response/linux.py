@@ -11,7 +11,9 @@ from rekall.plugins.response import processes
 from rekall.plugins.overlays import basic
 
 
-class LiveMap(utils.AttributeDict):
+class LiveMap(utils.SlottedObject):
+    __slots__ = ("start", "end", "perms", "file_offset", "dev", "inode",
+                 "filename")
 
     @utils.safe_property
     def length(self):
@@ -36,12 +38,12 @@ class IRMaps(processes.APIProcessFilter):
 
     table_header = [
         dict(name='proc', type="proc", hidden=True),
-        dict(name='', cname="divider", type="Divider"),
+        dict(name="divider", type="Divider"),
         dict(name='Map', hidden=True),
-        dict(name='Start Addr', cname='start', style="address"),
-        dict(name='End Addr', cname='end', style="address"),
-        dict(name='Perms', cname='perms', width=4),
-        dict(name='Filename', cname='filename')
+        dict(name='start', style="address"),
+        dict(name='end', style="address"),
+        dict(name='perms', width=4),
+        dict(name='filename')
     ]
 
     def generate_maps(self, pid):

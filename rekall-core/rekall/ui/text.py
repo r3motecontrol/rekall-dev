@@ -362,7 +362,7 @@ class TextObjectRenderer(renderer_module.ObjectRenderer):
         return padding * max(
             0, self.address_size - 2 - len(result)) + "0x" + result
 
-    def render_header(self, name=None, style=StyleEnum.full, hex_width=0,
+    def render_header(self, name="", style=StyleEnum.full, hex_width=0,
                       **options):
         """This should be overloaded to return the header Cell.
 
@@ -382,7 +382,8 @@ class TextObjectRenderer(renderer_module.ObjectRenderer):
         if style == "address" and header_cell.width < self.address_size:
             header_cell.rewrap(width=self.address_size, align="c")
 
-        self.header_width = header_cell.width
+        self.header_width = max(header_cell.width, len(name))
+        header_cell.rewrap(align="c", width=self.header_width)
 
         # Append a dashed line as a table header separator.
         header_cell.append_line("-" * self.header_width)
@@ -1004,10 +1005,6 @@ class TextColumn(object):
             object_renderer = TextObjectRenderer(self.renderer, self.session)
             header = object_renderer.render_header(**self.options)
 
-        header.rewrap(
-            align="c",
-            width=max(header.width, len(unicode(self.options.get("name", "")))))
-
         self.header_width = header.width
 
         return header
@@ -1153,16 +1150,21 @@ class TextTable(renderer_module.BaseTable):
                 for i, column in enumerate(self.columns):
                     length = 1
                     for row in self.deferred_rows:
-                        # Render everything on the same line
-                        rendered_lines = column.render_row(
-                            row[0][i], nowrap=1).lines
+                        try:
+                            # Render everything on the same line
+                            rendered_lines = column.render_row(
+                                row[0][i], nowrap=1).lines
 
-                        if rendered_lines:
-                            rendered_line = rendered_lines[0]
-                        else:
-                            rendered_line = ""
 
-                        length = max(length, len(rendered_line))
+                            if rendered_lines:
+                                rendered_line = rendered_lines[0]
+                            else:
+                                rendered_line = ""
+
+                            length = max(length, len(rendered_line))
+
+                        except IndexError:
+                            pass
 
                     max_widths.append(length)
 
@@ -1609,6 +1611,10 @@ class DividerObjectRenderer(TextObjectRenderer):
 
         super(DividerObjectRenderer, self).__init__(
             renderer, session=session, **options)
+
+    def render_header(self, **options):
+        self.header_width = 0
+        return Cell("")
 
     def render_row(self, target, child=None, **options):
         last_row = self.renderer.table.options.get("last_row")

@@ -29,6 +29,8 @@ class Describe(plugin.TypedProfileCommand, plugin.ProfileCommand):
 
     name = "describe"
 
+    PROFILE_REQUIRED = False
+
     __args = [
         dict(name="plugin_name", required=True, positional=True,
              help="A plugin or plugin name to describe."),
@@ -83,7 +85,7 @@ class Describe(plugin.TypedProfileCommand, plugin.ProfileCommand):
 
         plugin_cls = self.session.plugins.GetPluginClass(plugin_name)
         if not plugin_cls:
-            raise plugin.PluginError("Please specify a value plugin.")
+            raise plugin.PluginError("Please specify a valid plugin.")
 
         instance = plugin_cls(session=self.session, ignore_required=True)
         table_header = getattr(instance, "table_header", None)
@@ -94,7 +96,7 @@ class Describe(plugin.TypedProfileCommand, plugin.ProfileCommand):
 
         column_types = instance.column_types()
         for i, column in enumerate(table_header):
-            column_name = column.get("cname", column.get("name"))
+            column_name = column["name"]
             if isinstance(column_types, dict):
                 column_type_instance = column_types.get(column_name)
             else:

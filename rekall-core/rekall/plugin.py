@@ -178,7 +178,44 @@ class CommandOption(object):
         return value
 
 
-class Command(object):
+class ModeBasedActiveMixin(object):
+    # Specify this mode to decleratively activate this class. To make this work,
+    # you will need to define a kb.ParameterHook() that can calculate if the
+    # session is running in the specified mode.
+    mode = None
+
+    @classmethod
+    def is_active(cls, session):
+        """Checks we are active.
+
+        This method will be called with the session to check if this specific
+        class is active. This mechanism allows multiple implementations to all
+        share the same name, as long as only one is actually active. For
+        example, we can have a linux, windows and mac version of plugins with
+        the "pslist" name.
+
+        This mixin provides the mixed class with a basic is_active() method
+        which honors a mode member defined on the class and all its
+        subclasses. The mode is additive (meaning each class and its subclasses
+        are only active if the mode is active).
+        """
+        for subclass in cls.__mro__:
+            mode = getattr(subclass, "mode", None)
+
+            if isinstance(mode, basestring):
+                if not session.GetParameter(mode):
+                    return False
+
+            elif isinstance(mode, (list, tuple)):
+                for i in mode:
+                    if not session.GetParameter(i):
+                        return False
+
+        return True
+
+
+
+class Command(ModeBasedActiveMixin):
     """A command can be run from the rekall command line.
 
     Commands can be automatically imported into the shell's namespace and are
@@ -211,6 +248,8 @@ class Command(object):
 
     # This will hold the error status from running this plugin.
     error_status = None
+
+    mode = None
 
     @classmethod
     def args(cls, parser):
@@ -317,7 +356,10 @@ class Command(object):
                 # do stuff
         """
         if callable(getattr(self, "collect", None)):
-            return self.collect()
+            for x in self.collect():
+                if x:
+                    yield x
+
         else:
             raise TypeError("%r is not iterable." % self)
 
@@ -333,19 +375,6 @@ class Command(object):
         Args:
           renderer: A renderer based at rekall.ui.renderer.BaseRenderer.
         """
-
-    @classmethod
-    def is_active(cls, session):
-        """Checks we are active.
-
-        This method will be called with the session to check if this specific
-        class is active. This mechanism allows multiple implementations to all
-        share the same name, as long as only one is actually active. For
-        example, we can have a linux, windows and mac version of plugins with
-        the "pslist" name.
-        """
-        _ = session
-        return True
 
     @classmethod
     def GetActiveClasses(cls, session):
@@ -381,13 +410,13 @@ class ProfileCommand(Command):
             # needed. This might be slightly unexpected: When command line
             # completing the available plugins we will trigger profile
             # autodetection in order to determine which plugins are active.
-            profile = (super(ProfileCommand, cls).is_active(session) and
-                       session.profile != None)
+            profile = (session.profile != None and
+                       super(ProfileCommand, cls).is_active(session))
 
             return profile
 
         else:
-            return True
+            return super(ProfileCommand, cls).is_active(session)
 
     def __init__(self, profile=None, **kwargs):
         """Baseclass for all plugins which accept a profile.
@@ -424,11 +453,9 @@ class ProfileCommand(Command):
 
 class PluginHeader(object):
     header = None
-    by_cname = None
     by_name = None
 
     def __init__(self, *columns):
-        self.by_cname = {}
         self.by_name = {}
 
         for column in columns:
@@ -438,27 +465,16 @@ class PluginHeader(object):
                                 "using dicts, NOT tuples). Table header %r "
                                 "is invalid." % columns)
 
-            cname = column.get("cname")
-            if cname is None:
-                cname = column.get("name")
-
-            if not cname:
+            name = column.get("name")
+            if not name:
                 raise ValueError(
                     "Plugins declaring table headers ahead of "
-                    "time MUST specify 'cname' or 'name' for each column. "
+                    "time MUST specify 'name' for each column. "
                     "Table header %r is invalid." % (columns,))
 
-            if self.by_cname.get(cname):
-                raise ValueError("Duplicate cname %r! Table header %r is "
-                                 "invalid." % (cname, columns))
+            self.by_name[name] = column
 
-            self.by_cname[cname] = column
-
-            name = column.get("name")
-            if name:
-                self.by_name[name] = column
-
-        self.header = columns
+        self.header = copy.deepcopy(columns)
 
     @utils.safe_property
     def types_in_output(self):
@@ -484,7 +500,7 @@ class PluginHeader(object):
     def fill_dict(self, row):
         """Fills out dict with all the declared columns."""
         for header in self.header:
-            column_name = header.get("cname", header.get("name"))
+            column_name = header["name"]
             if column_name not in row:
                 row[column_name] = None
 
@@ -497,7 +513,7 @@ class PluginHeader(object):
         """
         result = {}
         for idx, header in enumerate(self.header):
-            column_name = header.get("cname", header.get("name"))
+            column_name = header["name"]
 
             try:
                 result[column_name] = row[idx]
@@ -508,11 +524,11 @@ class PluginHeader(object):
 
     @utils.safe_property
     def all_names(self):
-        return set(self.by_cname.iterkeys()) | set(self.by_name.iterkeys())
+        return set(self.by_name.iterkeys())
 
     def find_column(self, name):
-        """Get the column spec in 'name' by either cname or some heuristic."""
-        return self.by_cname.get(name, self.by_name.get(name))
+        """Get the column spec in 'name'."""
+        return self.by_name.get(name)
 
 class ArgsParserMixin(object):
     """A Mixin which provides argument parsing and validation."""
@@ -594,9 +610,21 @@ class TypedProfileCommand(ArgsParserMixin):
     table_header = None
     table_options = {}
 
+    __args = [
+        dict(name="verbosity", default=1, type="IntParser",
+             help="An integer reflecting the amount of desired output: "
+             "0 = quiet, 10 = noisy."),
+    ]
+
     def __init__(self, *pos_args, **kwargs):
+        super(TypedProfileCommand, self).__init__(*pos_args, **kwargs)
         if isinstance(self.table_header, (list, tuple)):
             self.table_header = PluginHeader(*self.table_header)
+
+        # Switch off hidden column when verbosity is high.
+        if self.plugin_args.verbosity > 1:
+            for descriptor in self.table_header:
+                descriptor["hidden"] = False
 
         super(TypedProfileCommand, self).__init__(*pos_args, **kwargs)
 
@@ -640,8 +668,7 @@ class TypedProfileCommand(ArgsParserMixin):
         result = {}
         columns = []
         for column in self.table_header:
-            column_name = column.get(
-                "cname", column.get("name"))
+            column_name = column["name"]
 
             columns.append(column_name)
             result[column_name] = None
@@ -679,6 +706,14 @@ class TypedProfileCommand(ArgsParserMixin):
             else:
                 yield self.table_header.dictify(row)
 
+    # Row members which control some output.
+    ROW_OPTIONS = set(
+        ["depth",
+         "annotation",
+         "highlight",
+         "nowrap",
+         "hex_width"]
+    )
     def render(self, renderer, **options):
         table_options = self.table_options.copy()
         table_options.update(options)
@@ -695,13 +730,18 @@ class TypedProfileCommand(ArgsParserMixin):
                 new_row = []
                 for column in self.table_header:
                     new_row.append(
-                        row.pop(column.get("cname", column.get("name")), None)
+                        row.pop(column["name"], None)
                     )
+
+                if set(row) - self.ROW_OPTIONS:
+                    raise RuntimeError(
+                        "Plugin produced more data than defined columns (%s)." %
+                        (list(row),))
 
                 renderer.table_row(*new_row, **row)
 
     def reflect(self, member):
-        column = self.table_header.by_cname.get(member)
+        column = self.table_header.by_name.get(member)
         if not column:
             raise KeyError("Plugin %r has no column %r." % (self, member))
 
@@ -752,8 +792,7 @@ class Producer(TypedProfileCommand):
     @registry.classproperty
     @registry.memoize
     def table_header(self):
-        return PluginHeader(dict(type=self.type_name, name=self.type_name,
-                                 cname=self.type_name))
+        return PluginHeader(dict(type=self.type_name, name=self.type_name))
 
     def collect(self):
         raise NotImplementedError()
@@ -868,27 +907,6 @@ class PrivilegedMixIn(object):
                 "privileged sessions.")
 
 
-class VerbosityMixIn(object):
-    """Use this mixin to provide a --verbosity option to a plugin.
-
-    If verbosity is > 1, we enable hidden columns.
-    """
-
-    __args = [
-        dict(name="verbosity", default=1, type="IntParser",
-             help="An integer reflecting the amount of desired output: "
-             "0 = quiet, 10 = noisy."),
-    ]
-
-    def __init__(self, *args, **kwargs):
-        super(VerbosityMixIn, self).__init__(*args, **kwargs)
-        table_header = getattr(self, "table_header", None)
-        if table_header and self.plugin_args.verbosity > 1:
-            self.table_header = copy.deepcopy(table_header)
-            for descriptor in self.table_header:
-                descriptor["hidden"] = False
-
-
 class DataInterfaceMixin(object):
     """This declares a plugin to present a table-like data interface."""
 
@@ -934,7 +952,7 @@ class PluginMetadataDatabase(object):
         # time.
         if len(results) > 1:
             raise RuntimeError("Multiple plugin implementations for %s: %s" % (
-                plugin_name, results))
+                plugin_name, [x.plugin_cls for x in results]))
 
         if results:
             return results[0]

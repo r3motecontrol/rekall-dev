@@ -38,13 +38,13 @@ class LinuxPsList(common.LinProcessFilter):
     __name = "pslist"
 
     table_header = [
-        dict(name="Task", cname="proc", width=40, type="task_struct"),
-        dict(name="PPID", cname="ppid", align="r", width=6),
-        dict(name="UID", cname="uid", align="r", width=6),
-        dict(name="GID", cname="gid", align="r", width=6),
-        dict(name="DTB", cname="dtb", style="address"),
-        dict(name="Start Time", cname="start_time", align="r", width=24),
-        dict(name="Binary", cname="binary")
+        dict(name="proc", width=40, type="task_struct"),
+        dict(name="ppid", align="r", width=6),
+        dict(name="uid", align="r", width=6),
+        dict(name="gid", align="r", width=6),
+        dict(name="dtb", style="address"),
+        dict(name="start_time", align="r", width=24),
+        dict(name="binary")
     ]
 
     def column_types(self):
@@ -56,7 +56,7 @@ class LinuxPsList(common.LinProcessFilter):
             gid=utils.HexInteger(0),
             dtb=utils.HexInteger(0),
             start_time=task.task_start_time,
-            name="")
+            binary="")
 
     def collect(self):
         for task in self.filter_processes():
@@ -79,7 +79,9 @@ class LinMemDump(memmap.MemDumpMixin, common.LinProcessFilter):
     """Dump the addressable memory for a process."""
 
 
-class TestLinMemDump(common.LinuxTestMixin, testlib.HashChecker):
+class TestLinMemDump(testlib.HashChecker):
+    mode = "mode_linux_memory"
+
     PARAMETERS = dict(
         commandline="memdump --proc_regex %(proc_name)s --dump_dir %(tempdir)s",
         proc_name="bash",

@@ -53,22 +53,12 @@ class AbstractWindowsCommandPlugin(plugin.PhysicalASMixin,
 
     __abstract = True
 
-    @classmethod
-    def is_active(cls, session):
-        """We are only active if the profile is windows."""
-        return (super(AbstractWindowsCommandPlugin, cls).is_active(session) and
-                session.profile.metadata("live_mode") in ['Memory', None] and
-                session.profile.metadata("os") == 'windows')
+    mode = "mode_windows_memory"
 
 
 class AbstractWindowsParameterHook(kb.ParameterHook):
 
-    @classmethod
-    def is_active(cls, session):
-        """We are only active if the profile is windows."""
-        return (super(AbstractWindowsParameterHook, cls).is_active(session) and
-                session.profile.metadata("live_mode") in ['Memory', None] and
-                session.profile.metadata("os") == 'windows')
+    mode = "mode_windows_memory"
 
 
 class WinDTBScanner(scan.BaseScanner):
@@ -232,8 +222,8 @@ class WinFindDTB(AbstractWindowsCommandPlugin, core.FindDTB):
 
     table_header = [
         dict(name="_EPROCESS (P)", style="address"),
-        dict(name="DTB", cname="dtv", style="address"),
-        dict(name="Valid", cname="valid", width=10)
+        dict(name="dtv", style="address"),
+        dict(name="valid", width=10)
     ]
 
     def collect(self):
@@ -564,7 +554,6 @@ class WinScanner(scanners.BaseScannerPlugin, WinProcessFilter):
                         data=dict(type=comment, pool=pool))
 
                     run.length = min(run.length, self.plugin_args.limit)
-
                     yield run
 
             # Non paged pool selection.

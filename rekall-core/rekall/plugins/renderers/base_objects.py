@@ -88,6 +88,21 @@ class UnixTimestampObjectRenderer(BaseObjectTextRenderer):
         return text.Cell("-")
 
 
+class ArrotTimestampObjectRenderer(BaseObjectTextRenderer):
+    renders_type = "Arrow"
+
+    timeformat = "YYYY-MM-DD HH:mm:ss"
+
+    def render_row(self, target, details=False, **options):
+        if details:
+            return text.Cell(target.isoformat())
+
+        if target != None:
+            return text.Cell(target.format(self.timeformat))
+
+        return text.Cell("-")
+
+
 class PythonBoolTextRenderer(text.TextObjectRenderer):
     renders_type = "bool"
 
@@ -302,12 +317,12 @@ class StructTextRenderer(text.TextObjectRenderer):
 
         values = []
         for column in self.columns:
-            cname = column.get("cname")
-            if not cname:
+            name = column.get("name")
+            if not name:
                 raise ValueError(
-                    "Column spec %r doesn't specify 'cname'." % column)
+                    "Column spec %r doesn't specify 'name'." % column)
 
-            values.append(getattr(target, cname))
+            values.append(getattr(target, name))
 
         return self.table.get_row(*values)
 
@@ -354,7 +369,8 @@ class TextHexdumpRenderer(text.TextObjectRenderer):
 
     def render_row(self, item, hex_width=None, **options):
         if hex_width is None:
-            hex_width = self.session.GetParameter("hexdump_width", 8)
+            hex_width = (item.options.get("hex_width") or
+                         self.session.GetParameter("hexdump_width", 8))
 
         data = item.value
         highlights = item.highlights or []

@@ -21,13 +21,20 @@
 #
 """This is a windows specific address space."""
 import os
-import pywintypes
 import struct
 import weakref
+
+import pywintypes
 import win32file
 
 from rekall import addrspace
 from rekall.plugins.addrspaces import standard
+
+
+PMEM_MODE_IOSPACE = 0
+PMEM_MODE_PHYSICAL = 1
+PMEM_MODE_PTE = 2
+PMEM_MODE_PTE_PCI = 3
 
 
 def CTL_CODE(DeviceType, Function, Method, Access):
@@ -36,6 +43,7 @@ def CTL_CODE(DeviceType, Function, Method, Access):
 
 # IOCTLS for interacting with the driver.
 INFO_IOCTRL = CTL_CODE(0x22, 0x103, 0, 3)
+CTRL_IOCTRL = CTL_CODE(0x22, 0x101, 0, 3)
 
 PAGE_SHIFT = 12
 
@@ -210,6 +218,12 @@ class WinPmemAddressSpace(Win32AddressSpace):
               ["NumberOfRuns"])
 
     def ParseMemoryRuns(self, fhandle):
+        # Set acquisition mode. If the driver does not support this mode it will
+        # just fall back to the default.
+        win32file.DeviceIoControl(
+            fhandle, CTRL_IOCTRL,
+            struct.pack("I", PMEM_MODE_PTE), 4, None)
+
         result = win32file.DeviceIoControl(
             fhandle, INFO_IOCTRL, "", 102400, None)
 
@@ -233,12 +247,20 @@ class WinPmemAddressSpace(Win32AddressSpace):
             self.session.SetCache("kernel_base", kernel_base, volatile=False)
 
     def _map_raw_filename(self, filename):
+        # Parsing the NTFS can be expensive so we only do it when the user
+        # specifically wanted to be thorough.
+        if self.session.GetParameter("performance") != "thorough":
+            return
+
         drive, base_filename = os.path.splitdrive(filename)
+        if not drive:
+            return
+
         try:
             ntfs_session = self.filesystems[drive]
         except KeyError:
             ntfs_session = self.filesystems[drive] = self.session.add_session(
-                filename=r"\\.\%s" % drive, verbose=True,
+                filename=r"\\.\%s" % drive, verbose=True, autodetect=[],
                 profile="ntfs")
 
         # Stat the MFT inode (MFT 2).

@@ -48,18 +48,18 @@ class ConnScan(tcpip_vtypes.TcpipPluginMixin,
 
     __name = "connscan"
 
-    table_header = plugin.PluginHeader(
-        dict(name="Offset(P)", cname="offset_p", style="address"),
-        dict(name="Local Address", cname="local_net_address",
-             align="l", width=25),
-        dict(name="Remote Address", cname="remote_net_address",
-             align="l", width=25),
-        dict(name="Pid", cname="pid", width=10, align="r")
-    )
+    table_header = [
+        dict(name="offset_p", style="address"),
+        dict(name="local_net_address", align="l", width=25),
+        dict(name="remote_net_address", align="l", width=25),
+        dict(name="pid", width=10, align="r")
+    ]
 
     scanner_defaults = dict(
         scan_physical=True
     )
+
+    mode = "mode_xp"
 
     def column_types(self):
         tcp_obj = self.tcpip_profile._TCPT_OBJECT()
@@ -67,12 +67,6 @@ class ConnScan(tcpip_vtypes.TcpipPluginMixin,
                     local_net_address="172.16.176.143:1034",
                     remote_net_address="131.107.115.254:80",
                     pid=tcp_obj.Pid)
-
-    @classmethod
-    def is_active(cls, session):
-        # These only work for XP.
-        return (super(ConnScan, cls).is_active(session) and
-                session.profile.metadata("major") == 5)
 
     def collect(self):
         """Search the physical address space for _TCPT_OBJECTs.

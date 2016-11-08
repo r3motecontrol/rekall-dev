@@ -77,9 +77,9 @@ def Hexdump(data, width=16):
 
 def WriteHexdump(renderer, data, base=0, width=16):
     """Write the hexdump to the fd."""
-    renderer.table_header([dict(name='Offset', cname="offset", style="address"),
-                           dict(name='Hex', cname="hex", width=width * 3),
-                           dict(name='Data', cname='data', width=width)])
+    renderer.table_header([dict(name="offset", style="address"),
+                           dict(name="hex", width=width * 3),
+                           dict(name='data', width=width)])
 
     for offset, hexdata, translated_data in Hexdump(data):
         renderer.table_row(base + offset, hexdata, "".join(translated_data))
@@ -526,9 +526,26 @@ class FormattedAddress(object):
             return ""
 
 
-class AttributeDict(dict):
+class SlottedObject(object):
+    """A general purpose PODO."""
 
-    """A dict that can be accessed via attributes."""
+    # Declare this object's fields here.
+    __slots__ = ()
+
+    def __init__(self):
+        for k in self.__slots__:
+            setattr(self, k, None)
+
+    def keys(self):
+        return [x for x in dir(self) if not x.startswith("_")]
+
+
+class AttributeDict(dict):
+    """A dict that can be accessed via attributes.
+
+    This object is very slow due to use of __setstate__. Please consider using
+    SlottedObject instead.
+    """
     dirty = False
 
     _object_id = None
@@ -793,9 +810,17 @@ class RangedCollection(object):
         return "\n".join(result)
 
 
-class JITIterator(object):
-    def __init__(self, baseclass):
-        self.baseclass = baseclass
+class JITIteratorCallable(object):
+    def __init__(self, func, *args):
+        if not callable(func):
+            raise RuntimeError("Function must be callable")
+
+        self.func = func
+        self.args = args
+
+    def __iter__(self):
+        for x in self.func(*self.args):
+            yield x
 
     def __contains__(self, item):
         return item in list(self)
@@ -803,9 +828,11 @@ class JITIterator(object):
     def __str__(self):
         return str(list(self))
 
-    def __iter__(self):
-        return (
-            x.name for x in self.baseclass.classes.values() if x.name)
+
+class JITIterator(JITIteratorCallable):
+    def __init__(self, baseclass):
+        super(JITIterator, self).__init__(
+            lambda: (x.name for x in baseclass.classes.values() if x.name))
 
 
 def CopyFDs(in_fd, out_fd, length=2**64):
@@ -995,3 +1022,20 @@ def EscapeForFilesystem(filename):
     """
     s = SmartStr(filename).strip().replace(" ", "_")
     return re.sub(r"(?u)[^-\w.]", "", s)
+
+
+def get_all_subclasses(base=None):
+    for x in base.__subclasses__():
+        yield x.__name__
+        for y in get_all_subclasses(x):
+            yield y
+
+
+def join_path(*args):
+    result = "/".join(args)
+    result = re.sub("/+", "/", result)
+    return result.strip("/")
+
+
+def normpath(path):
+    return "/" + join_path(*path.split("/"))

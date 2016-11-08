@@ -123,11 +123,7 @@ class WinDNSCache(common.WindowsCommandPlugin):
 
     name = "dns_cache"
 
-    @classmethod
-    def is_active(cls, session):
-        return (super(WinDNSCache, cls).is_active(session) and
-                session.profile.metadata("arch") == "AMD64" and
-                session.profile.metadata("major") >= 6)
+    mode = ["mode_amd64", "mode_vista_plus"]
 
     __args = [
         dict(name="hashtable",
@@ -139,9 +135,9 @@ class WinDNSCache(common.WindowsCommandPlugin):
 
     table_header = [
         dict(name="Name", type="TreeNode", width=45),
-        dict(name="Record", cname="record", style="address"),
-        dict(name="Type", cname="type", width=16),
-        dict(name="Data", cname="data"),
+        dict(name="record", style="address"),
+        dict(name="type", width=16),
+        dict(name="data"),
     ]
 
     def column_types(self):

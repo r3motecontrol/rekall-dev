@@ -62,6 +62,28 @@ class IRFind(common.AbstractIRCommandPlugin):
                     yield (result.st_mode, result.st_size, result)
 
 
+class IRStat(common.AbstractIRCommandPlugin):
+    name = "stat"
+
+    __args = [
+        dict(name="paths", positional=True, type="Array",
+             help="Paths to hash."),
+    ]
+
+    table_header = [
+        dict(name="Perms", type="Permissions", width=16),
+        dict(name="Size", align="r", width=10),
+        dict(name="Path"),
+    ]
+
+    def collect(self):
+        for full_path in self.plugin_args.paths:
+            result = common.FileFactory(full_path, session=self.session)
+            if result:
+                yield dict(Perms=result.st_mode, Size=result.st_size,
+                           Path=result)
+
+
 class Hash(object):
     """A class to hold a hash value."""
     def __init__(self, type="md5", value=None):
@@ -113,29 +135,20 @@ class IRHash(common.AbstractIRCommandPlugin):
 
 
 class Component(object):
-    def __init__(self, session, component, cache):
+    def __init__(self, session, component=None, cache=None):
         self.session = session
         self.component = component
         self.component_cache = cache
 
-    def _build_cache(self, file_info):
-        """Builds a case corrected cache of filenames.
+    def stat(self, path):
+        key = unicode(path)
+        try:
+            return self.component_cache[key]
+        except KeyError:
+            stat = common.FileFactory(path)
+            self.component_cache.Put(key, stat)
 
-        keys are lower cased filenames within the directory file_info. Values
-        are lists of files with those lower cased filenames with the correct
-        casing.
-
-        """
-        cache = {}
-        # Cache not populated
-        for child in file_info.list():
-            basename = os.path.basename(
-                child.filename.name.rstrip(
-                    child.filename.path_sep)).lower()
-            cache.setdefault(basename, []).append(child)
-
-        self.component_cache.Put(file_info.filename.name, cache)
-        return cache
+            return stat
 
     def __eq__(self, other):
         return unicode(self) == unicode(other)
@@ -155,55 +168,79 @@ class LiteralComponent(Component):
 
         return False
 
-    def filter(self, file_info):
+    def filter(self, path):
         # For case insensitive filesystems we can just try to open the
         # component.
         if self.case_insensitive_filesystem():
-            result = common.FileFactory(
-                file_info.filename.add(self.component),
-                session=self.session)
-            if result:
-                return [result]
+            result_pathspec = path.add(self.component)
+            stat = self.stat(result_pathspec)
+            if stat:
+                return [stat.filename]
+            else:
+                return []
 
+        # Since we must match a case insensitve filename we need to
+        # list all the files and find the best match.
+        stat = common.FileFactory(path)
+        if not stat:
             return []
 
-        key = self.component.lower()
-        try:
-            cache = self.component_cache.Get(file_info.filename.name)
-        except KeyError:
-            cache = self._build_cache(file_info)
+        children = {}
+        for x in stat.list_names():
+            children.setdefault(x.lower(), []).append(x)
 
-        return cache.get(key, [])
+        return [stat.filename.add(x)
+                for x in children.get(self.component.lower(), [])]
 
 
 class RegexComponent(Component):
-    def __init__(self, *args):
-        super(RegexComponent, self).__init__(*args)
+    def __init__(self, *args, **kwargs):
+        super(RegexComponent, self).__init__(*args, **kwargs)
         self.component_re = re.compile(self.component, re.I)
 
-    def filter(self, file_info):
-        for child in file_info.list():
-            basename = os.path.basename(child.filename.name)
-            if self.component_re.match(basename):
-                yield child
+    def filter(self, path):
+        stat = self.stat(path)
+        if not stat:
+            return
+
+        if stat.st_mode.is_dir() and not stat.st_mode.is_link():
+            self.session.report_progress("Searching %s", path)
+            for basename in stat.list_names():
+                if self.component_re.match(basename):
+                    yield stat.filename.add(basename)
 
 
 class RecursiveComponent(RegexComponent):
-    def __init__(self, session, component, cache, depth):
-        super(RecursiveComponent, self).__init__(session, component, cache)
+    def __init__(self, depth=3, **kwargs):
+        super(RecursiveComponent, self).__init__(**kwargs)
         self.depth = depth
 
-    def filter(self, file_info, depth=0):
-        if depth == self.depth:
+    def filter(self, path, depth=0):
+        self.session.report_progress("Recursing into %s", path)
+
+        # TODO: Deal with cross devices.
+        if depth >= self.depth:
             return
 
-        for child in file_info.list():
-            yield child
+        stat = self.stat(path)
+        if not stat:
+            return
 
-            basename = os.path.basename(child.filename.name).lower()
-            if self.component_re.match(basename):
-                for subitem in self.filter(child, depth+1):
-                    yield subitem
+        # Do not follow symlinks.
+        if stat.st_mode.is_dir() and not stat.st_mode.is_link():
+            # The top level counts as a hit, so that e.g. /**/*.txt
+            # matches /foo.txt as well.
+            if depth == 0:
+                yield stat.filename
+
+            for basename in stat.list_names():
+                if (self.component_re.match(basename) and
+                    not stat.st_mode.is_link()):
+                    subdir = stat.filename.add(basename)
+                    yield subdir
+
+                    for subitem in self.filter(subdir, depth+1):
+                        yield subitem
 
 
 class IRGlob(common.AbstractIRCommandPlugin):
@@ -222,8 +259,6 @@ class IRGlob(common.AbstractIRCommandPlugin):
         dict(name="case_insensitive", default=True, type="Bool",
              help="Globs will be case insensitive."),
         dict(name="path_sep",
-             # Default path seperator is platform dependent.
-             default="\\" if platform.system() == "Windows" else "/",
              help="Path separator character (/ or \\)"),
         dict(name="filesystem", choices=common.FILE_SPEC_DISPATCHER,
              type="Choices", default="API",
@@ -231,7 +266,7 @@ class IRGlob(common.AbstractIRCommandPlugin):
     ]
 
     table_header = [
-        dict(name="Path", cname="path", type="FileInformation"),
+        dict(name="path", type="FileInformation"),
     ]
 
     def column_types(self):
@@ -248,6 +283,12 @@ class IRGlob(common.AbstractIRCommandPlugin):
 
     def __init__(self, *args, **kwargs):
         super(IRGlob, self).__init__(*args, **kwargs)
+        self.component_cache = utils.FastStore(50)
+
+        # Default path seperator is platform dependent.
+        if not self.plugin_args.path_sep:
+            self.plugin_args.path_sep = (
+                "\\" if platform.system() == "Windows" else "/")
 
         # By default use the root of the filesystem.
         if self.plugin_args.root is None:
@@ -322,8 +363,11 @@ class IRGlob(common.AbstractIRCommandPlugin):
           ValueError: If the glob is invalid.
 
         """
+        pattern_components = common.FileSpec(
+            pattern, path_sep=self.plugin_args.path_sep).components()
+
         components = []
-        for path_component in pattern.split(self.plugin_args.path_sep):
+        for path_component in pattern_components:
             if not path_component:
                 continue
 
@@ -338,47 +382,43 @@ class IRGlob(common.AbstractIRCommandPlugin):
                     depth = int(m.group(1))
 
                 path_component = path_component.replace(m.group(0), "*")
-
                 component = RecursiveComponent(
-                    self.session,
-                    fnmatch.translate(path_component),
-                    self.component_cache,
+                    session=self.session,
+                    component=fnmatch.translate(path_component),
+                    cache=self.component_cache,
                     depth=depth)
 
             elif self.GLOB_MAGIC_CHECK.search(path_component):
                 component = RegexComponent(
-                    self.session,
-                    fnmatch.translate(path_component),
-                    self.component_cache)
+                    session=self.session,
+                    cache=self.component_cache,
+                    component=fnmatch.translate(path_component))
 
             else:
                 component = LiteralComponent(
-                    self.session, path_component,
-                    self.component_cache)
+                    session=self.session,
+                    cache=self.component_cache,
+                    component=path_component)
 
             components.append(component)
 
         return components
 
-    def _filter(self, node, file_information):
+    def _filter(self, node, path):
+        """Path is the pathspec of the path we begin evaluation with."""
         for component, child_node in node.iteritems():
             # Terminal node - yield the result.
             if not child_node:
-                for item in component.filter(file_information):
-                    yield item
+                for subpath in component.filter(path):
+                    yield subpath
 
             else:
                 # Non - terminal node, walk the subnode recursively.
-                for matching_file_info in component.filter(file_information):
-                    for item in self._filter(child_node, matching_file_info):
-                        yield item
+                for matching_path in component.filter(path):
+                    for subpath in self._filter(child_node, matching_path):
+                        yield subpath
 
-    def collect_globs(self, globs):
-        root_spec = common.FileSpec(
-            self.plugin_args.root,
-            filesystem=self.plugin_args.filesystem,
-            path_sep=self.plugin_args.path_sep)
-
+    def make_component_tree(self, globs):
         expanded_globs = []
         for glob in globs:
             expanded_globs.extend(self._interpolate_grouping(glob))
@@ -389,12 +429,16 @@ class IRGlob(common.AbstractIRCommandPlugin):
             for component in self.convert_glob_into_path_components(glob):
                 node = node.setdefault(component, {})
 
-        root_file = common.FileFactory(root_spec, session=self.session)
-        for item in self._filter(component_tree, root_file):
-            yield item
+        return component_tree
+
+    def collect_globs(self, globs):
+        component_tree = self.make_component_tree(globs)
+        root = common.FileSpec(self.plugin_args.root,
+                               path_sep=self.plugin_args.path_sep)
+        for path in self._filter(component_tree, root):
+            yield common.FileFactory(path, session=self.session)
 
     def collect(self):
-        self.component_cache = utils.FastStore(50)
         for x in self.collect_globs(self.plugin_args.globs):
             yield dict(path=x)
 
@@ -430,10 +474,10 @@ class IRDump(IRGlob):
     ]
 
     table_header = [
-        dict(name="", cname="divider", type="Divider"),
+        dict(name="divider", type="Divider"),
         dict(name="FileSpec", hidden=True),
-        dict(name="Offset", cname="offset", style="address"),
-        dict(name="Data", cname="hexdump", width=65),
+        dict(name="offset", style="address"),
+        dict(name="hexdump", width=65),
     ]
 
     def collect(self):

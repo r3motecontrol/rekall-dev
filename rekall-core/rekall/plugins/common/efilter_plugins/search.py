@@ -19,11 +19,8 @@
 """Rekall's search function."""
 
 __author__ = "Adam Sindelar <adamsh@google.com>"
-
 import itertools
-import re
 
-from efilter import api
 from efilter import ast
 from efilter import errors
 from efilter import protocol
@@ -45,6 +42,7 @@ from rekall import plugin
 from rekall import testlib
 from rekall import utils
 from rekall.plugins.overlays import basic
+from rekall.plugins.common.efilter_plugins import helpers
 from rekall.ui import identity as identity_renderer
 
 
@@ -139,8 +137,7 @@ class FindPlugins(plugin.TypedProfileCommand, plugin.ProfileCommand):
 
     def render(self, renderer):
         renderer.table_header([
-            dict(name="Plugin", cname="plugin", type="Plugin", style="compact",
-                 width=30)
+            dict(name="plugin", type="Plugin", style="compact", width=30)
         ])
 
         for command in self.collect():
@@ -195,9 +192,8 @@ class Collect(plugin.TypedProfileCommand, plugin.ProfileCommand):
     def render(self, renderer):
         renderer.table_header([
             dict(name=self.plugin_args.type_name,
-                 cname=self.plugin_args.type_name,
                  type=self.plugin_args.type_name),
-            dict(name="Producers", cname="producers")
+            dict(name="producers")
         ])
 
         for result in self.collect():
@@ -222,20 +218,15 @@ class Lookup(plugin.TypedProfileCommand, plugin.ProfileCommand):
              help="The target args"),
     ]
 
+    table_header = [
+            dict(name="field")
+    ]
+
     def collect(self):
-        yield [self.session.address_resolver.get_constant_object(
+        yield dict(field=self.session.address_resolver.get_constant_object(
             self.plugin_args.constant,
             target=self.plugin_args.target,
-            target_args=self.plugin_args.target_args)]
-
-    def render(self, renderer):
-        renderer.table_header([
-            dict(name=self.plugin_args.constant, cname="result",
-                 type=self.plugin_args.target)
-        ])
-
-        for row in self.collect():
-            renderer.table_row(*row)
+            target_args=self.plugin_args.target_args))
 
 
 class CommandWrapper(object):
@@ -350,6 +341,7 @@ applicative.IApplicative.implicit_static(CommandWrapper)
 
 
 class EfilterPlugin(plugin.TypedProfileCommand, plugin.Command):
+
     """Abstract base class for plugins that do something with queries.
 
     Provides implementations of the basic EFILTER protocols for selecting and
@@ -376,8 +368,9 @@ class EfilterPlugin(plugin.TypedProfileCommand, plugin.Command):
             self.query = q.Query(self.plugin_args.query,
                                  params=self.plugin_args.query_parameters)
         except errors.EfilterError as error:
-            self.query_error = error
-            self.query = None
+            raise plugin.PluginError("Could not parse your query %r: %s." % (
+                self.plugin_args.query, error))
+
         except Exception:
             # I am using a broad except here to make sure we always display a
             # friendly error message. EFILTER will usually raise a friendly
@@ -387,55 +380,10 @@ class EfilterPlugin(plugin.TypedProfileCommand, plugin.Command):
             raise plugin.PluginError("Could not parse your query %r." % (
                 self.plugin_args.query,))
 
-        self._EXPORTED_EFILTER_FUNCTIONS = self._prepare_efilter_scopes()
-
-    def _prepare_efilter_scopes(self):
-        """Create the callables which can be used in the efilter scopes."""
-
-        # Exported EFilter functions. These can be used within efilter
-        # queries. For example select hex(cmd_address) from dis(0xfa8000895a32).
-        def hex_function(value):
-            """A Function to format the output as a hex string."""
-            if value == None:
-                return
-
-            return "%#x" % value
-
-        def str_function(value):
-            if value == None:
-                return
-
-            return utils.SmartUnicode(value)
-
-        def int_function(value):
-            if value == None:
-                return
-
-            return int(value)
-
-        def noncase_search_function(regex, value):
-            """Case insensitive regex search function."""
-            return bool(re.search(unicode(regex), unicode(value), re.I))
-
-        return dict(
-            hex=api.user_func(
-                hex_function, arg_types=[int], return_type=[str]),
-
-            str=api.user_func(
-                str_function, arg_types=[], return_type=[unicode]),
-
-            int=api.user_func(
-                int_function, arg_types=[], return_type=[int]),
-
-            regex_search=api.user_func(
-                noncase_search_function, arg_types=[unicode, unicode],
-                return_type=[bool]),
-        )
-
     # IStructured implementation for EFILTER:
     def resolve(self, name):
         """Find and return a CommandWrapper for the plugin 'name'."""
-        function = self._EXPORTED_EFILTER_FUNCTIONS.get(name)
+        function = helpers.EFILTER_SCOPES.get(name)
         if function:
             return function
 
@@ -449,7 +397,7 @@ class EfilterPlugin(plugin.TypedProfileCommand, plugin.Command):
     def getmembers_runtime(self):
         """Get all available plugins."""
         result = dir(self.session.plugins)
-        result += self._EXPORTED_EFILTER_FUNCTIONS.keys()
+        result += helpers.EFILTER_SCOPES.keys()
 
         return frozenset(result)
 
@@ -588,7 +536,7 @@ class Search(EfilterPlugin):
         """Used to render search results if they come from a plugin."""
         columns = []
         for column in table_header or []:
-            column_name = column.get("cname") or column.get("name")
+            column_name = column.get("name")
             columns.append(column_name)
 
             if column_name is None:
@@ -696,7 +644,7 @@ class Search(EfilterPlugin):
             return self._render_plugin_output(renderer, columns, all_rows)
 
         # Sigh. Give up, and render whatever you got, I guess.
-        renderer.table_header([dict(name="Result", cname="result")])
+        renderer.table_header([dict(name="result")])
         return self._render_whatever_i_guess(renderer, all_rows)
 
 
@@ -796,9 +744,8 @@ class Explain(EfilterPlugin):
 
         renderer.section("Type Analysis", width=140)
         renderer.table_header([
-            dict(name="Name", cname="name", type="TreeNode", max_depth=2,
-                 width=60),
-            dict(name="Type", cname="type", width=40)
+            dict(name="name", type="TreeNode", max_depth=2, width=60),
+            dict(name="type", width=40)
         ])
 
         renderer.table_row(self.query.source,
@@ -841,9 +788,8 @@ class Explain(EfilterPlugin):
     def render_query(self, renderer, query):
         """Render a single query object's analysis."""
         renderer.table_header([
-            dict(name="(Return Type) Expression", cname="expression",
-                 type="TreeNode", max_depth=15, width=40),
-            dict(name="Subquery", cname="query", width=100, nowrap=True),
+            dict(name="expression", type="TreeNode", max_depth=15, width=40),
+            dict(name="query", width=100, nowrap=True),
         ])
 
         self._render_node(query, query.root, renderer)
@@ -1001,5 +947,25 @@ structured.IStructured.implement(
     implementations={
         structured.resolve: lambda d, m: d.get(m),
         structured.getmembers_runtime: lambda d: d.keys(),
+    }
+)
+
+# SlottedObject is similar in functionality to AttributeDict but it is much
+# faster and so it is preferred.
+structured.IStructured.implement(
+    for_type=utils.SlottedObject,
+    implementations={
+        structured.resolve: lambda s, m: getattr(s, m, None),
+        structured.getmembers_runtime: lambda d: d.__slots__,
+    }
+)
+
+# If a None appears as a field but we wanted to dereference it we should just
+# ignore the error and propagate the None.
+structured.IStructured.implement(
+    for_type=type(None),
+    implementations={
+        structured.resolve: lambda x: None,
+        structured.getmembers_runtime: lambda x: [],
     }
 )

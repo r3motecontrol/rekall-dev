@@ -12,14 +12,13 @@ from rekall.plugins.overlays import basic
 from rekall.plugins import yarascanner
 
 
-class _LiveProcess(utils.AttributeDict):
+class _LiveProcess(utils.SlottedObject):
     """An object to represent a live process.
 
     This is the live equivalent of _EPROCESS.
     """
-    _proc = None
-    _obj_profile = None
-    session = None
+    __slots__ = ("_proc", "_obj_profile", "session",
+                 "start_time", "pid")
 
     def __init__(self, proc, session=None):
         """Construct a representation of the live process.
@@ -29,6 +28,7 @@ class _LiveProcess(utils.AttributeDict):
         """
         # Hold on to the original psutil object.
         self._proc = proc
+        self._obj_profile = None
         self.session = session
         super(_LiveProcess, self).__init__()
 
@@ -60,6 +60,8 @@ class _LiveProcess(utils.AttributeDict):
             if field_name == "environ":
                 return {}
 
+            return None
+        except AttributeError:
             return None
 
     def __format__(self, formatspec):
@@ -93,10 +95,11 @@ psutil_fields = ['cmdline', 'connections', 'cpu_affinity',
                  'memory_info_ex', 'memory_maps', 'memory_percent',
                  'name', 'nice', 'num_ctx_switches', 'num_fds',
                  'num_threads', 'open_files', 'pid', 'ppid',
-                 'status', 'terminal', 'threads', 'uids', 'username']
+                 'status', 'terminal', 'threads', 'uids', 'username',
+                 'num_handles']
 
 # Generate accessors for psutil derived properties.
-properties = {}
+properties = dict(__slots__=())
 for field in psutil_fields:
     properties[field] = property(
         lambda self, field=field: self._get_field(field))
@@ -161,11 +164,11 @@ class APIPslist(APIProcessFilter):
         dict(name="proc", hidden=True),
         dict(name="Name", width=30),
         dict(name="pid", width=6, align="r"),
-        dict(name="PPID", cname="ppid", width=6, align="r"),
-        dict(name="Thds", cname="thread_count", width=6, align="r"),
-        dict(name="Hnds", cname="handle_count", width=8, align="r"),
-        dict(name="Wow64", cname="wow64", width=6),
-        dict(name="Start", cname="start_time", width=24),
+        dict(name="ppid", width=6, align="r"),
+        dict(name="Thds", width=6, align="r"),
+        dict(name="Hnds", width=8, align="r"),
+        dict(name="wow64", width=6),
+        dict(name="start", width=24),
         dict(name="binary"),
     ]
 
@@ -183,10 +186,10 @@ class APIPslist(APIProcessFilter):
                     Name=proc.name,
                     pid=proc.pid,
                     ppid=proc.ppid,
-                    thread_count=proc.num_threads,
-                    handle_count=proc.num_handles,
+                    Thds=proc.num_threads,
+                    Hnds=proc.num_handles,
                     wow64=self.is_wow64(proc),
-                    start_time=proc.start_time,
+                    start=proc.start_time,
                     binary=proc.exe)
 
     def collect(self):

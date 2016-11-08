@@ -25,8 +25,9 @@
 __author__ = "Michael Cohen <scudette@google.com>"
 import platform
 import os
-import re
 import stat
+
+import arrow
 
 from efilter.protocols import associative
 from efilter.protocols import structured
@@ -36,7 +37,6 @@ from rekall import obj
 from rekall import registry
 from rekall import utils
 from rekall import plugin
-from rekall.plugins.overlays import basic
 
 
 # Will be registered by OS specific implementations.
@@ -66,15 +66,15 @@ class APIBaseProfile(obj.Profile):
                     os=platform.system())
 
 
-class FileSpec(utils.AttributeDict):
+class FileSpec(utils.SlottedObject):
     """Specification of a file path."""
 
-    __metaclass__ = registry.UniqueObjectIdMetaclass
+    __slots__ = ("name", "filesystem", "path_sep")
 
-    def __init__(self, filename, filesystem=u"API", path_sep="/"):
+    default_path_sep = "\\" if platform.system() == "Windows" else "/"
+
+    def __init__(self, filename, filesystem=u"API", path_sep=None):
         super(FileSpec, self).__init__()
-        self.filesystem = filesystem
-        self.path_sep = path_sep
 
         if isinstance(filename, FileSpec):
             # Copy the other file spec.
@@ -84,46 +84,64 @@ class FileSpec(utils.AttributeDict):
 
         elif isinstance(filename, basestring):
             self.name = unicode(filename)
+            self.filesystem = filesystem
+            self.path_sep = path_sep or self.default_path_sep
 
         else:
             raise TypeError("Filename must be a string or file spec.")
+
+    @property
+    def dirname(self):
+        return FileSpec(filename=self.join(self.components()[:-1]),
+                        path_sep=self.path_sep,
+                        filesystem=self.filesystem)
+
+    @property
+    def basename(self):
+        components = self.components()
+        if components:
+            return components[-1]
+        return ""
 
     def components(self):
         return filter(None, self.name.split(self.path_sep))
 
     def os_path(self):
-        # Handle canonical paths of the form /c:/windows/ -> c:/windows
-        # So they can be opened by the OS APIs.
+        """Get a path suitable to be used with os APIs."""
+        result = os.path.sep.join(self.components())
+        # On unix systems we anchor at root but on windows the drive
+        # name should be first.
+        if os.path.sep == "/":
+            result = "/" + result
 
-        # Try to split the path into a drive and path component.
-        m = re.match("\\%s([a-zA-Z]):(.*)" % self.path_sep, self.name)
-        if m:
-            # Make sure that path is never relative. In this code we
-            # always want to deal with absolute paths so they need leading "/".
-            path = m.group(2)
-            if not path.startswith(self.path_sep):
-                path = self.path_sep + path
-
-            drive = m.group(1)
-            return "%s:%s" % (drive, path)
-
-        return self.name
+        return result
 
     def __str__(self):
         return self.name
 
-    def add(self, component):
-        if self.name == self.path_sep:
-            path = self.name + component
-        else:
-            path = self.name + self.path_sep + component
+    def join(self, components):
+        result = self.path_sep.join(components)
+        # Since all paths are absolute, Unix style paths always have a
+        # leading /.
+        if self.path_sep == "/":
+            return self.path_sep + result
 
-        return FileSpec(filename=path, path_sep=self.path_sep,
+        # But Windows paths usually have the drive as the first
+        # component.
+        return result
+
+    def add(self, component):
+        components = self.components()
+        components.extend(component.split(self.path_sep))
+
+        return FileSpec(filename=self.join(components), path_sep=self.path_sep,
                         filesystem=self.filesystem)
 
 
-class User(utils.AttributeDict):
+class User(utils.SlottedObject):
     """A class to represent a user."""
+
+    __slots__ = ("session", "uid", "username", "homedir", "shell")
 
     @classmethod
     @registry.memoize
@@ -144,6 +162,9 @@ class User(utils.AttributeDict):
 
         return result
 
+    def __int__(self):
+        return self.uid
+
     def __unicode__(self):
         if self.username:
             return u"%s (%s)" % (self.username, self.uid)
@@ -153,8 +174,10 @@ class User(utils.AttributeDict):
         return ""
 
 
-class Group(utils.AttributeDict):
+class Group(utils.SlottedObject):
     """A class to represent a user."""
+
+    __slots__ = ("session", "gid", "group_name")
 
     @classmethod
     @registry.memoize
@@ -173,6 +196,9 @@ class Group(utils.AttributeDict):
 
         return result
 
+    def __int__(self):
+        return self.gid
+
     def __unicode__(self):
         if self.group_name:
             return u"%s (%s)" % (self.group_name, self.gid)
@@ -183,13 +209,15 @@ class Group(utils.AttributeDict):
         return ""
 
 
-class FileInformation(utils.AttributeDict):
+class FileInformation(utils.SlottedObject):
     """An object representing a file on disk.
 
     This FileInformation uses the API to read data about the file.
     """
 
-    session = None
+    __slots__ = ("session", "st_mode", "st_ino", "st_size",
+                 "st_dev", "st_nlink", "st_uid", "st_gid", "st_mtime",
+                 "st_atime", "st_ctime", "filename")
 
     def __init__(self, session=None, filename=None, **kwargs):
         super(FileInformation, self).__init__(**kwargs)
@@ -203,7 +231,8 @@ class FileInformation(utils.AttributeDict):
         result = FileInformation(filename=filespec, session=session)
 
         try:
-            s = os.stat(filespec.os_path())
+            path = filespec.os_path()
+            s = os.lstat(path)
         except (IOError, OSError) as e:
             return obj.NoneObject("Unable to stat %s", e)
 
@@ -214,20 +243,40 @@ class FileInformation(utils.AttributeDict):
         result.st_nlink = s.st_nlink
         result.st_uid = User.from_uid(s.st_uid)
         result.st_gid = Group.from_gid(s.st_gid)
-        result.st_mtime = basic.UnixTimeStamp(
-            name="st_mtime", value=s.st_mtime, session=session)
-        result.st_atime = basic.UnixTimeStamp(
-            name="st_atime", value=s.st_atime, session=session)
-        result.st_ctime = basic.UnixTimeStamp(
-            name="st_ctime", value=s.st_ctime, session=session)
+        result.st_mtime = s.st_mtime
+        result.st_atime = s.st_atime
+        result.st_ctime = s.st_ctime
 
         return result
+
+    @property
+    def mtime(self):
+        return arrow.Arrow.fromtimestamp(self.st_mtime)
+
+    @property
+    def atime(self):
+        return arrow.Arrow.fromtimestamp(self.st_atime)
+
+    @property
+    def ctime(self):
+        return arrow.Arrow.fromtimestamp(self.st_ctime)
 
     def open(self):
         try:
             return open(self.filename.os_path(), "rb")
         except (IOError, OSError) as e:
             return obj.NoneObject("Unable to open file: %s", e)
+
+    def list_names(self):
+        if not self.st_mode.is_dir():
+            return []
+
+        filename = self.filename.os_path()
+        try:
+            # Adding the separator forces listing as a directory.
+            return os.listdir(filename + os.path.sep)
+        except (OSError, IOError):
+            return []
 
     def list(self):
         """If this is a directory return a list of children."""
@@ -237,10 +286,7 @@ class FileInformation(utils.AttributeDict):
         filename = self.filename.os_path()
         try:
             for name in os.listdir(filename):
-                full_path = os.path.join(filename, name)
-                item = self.from_stat(full_path, session=self.session)
-                if item:
-                    yield item
+                yield self.filename.add(name)
         except (OSError, IOError):
             pass
 
@@ -299,8 +345,14 @@ class Permissions(object):
     def __str__(self):
         return self.filemode(self.value)
 
+    def __unicode__(self):
+        return self.filemode(self.value)
+
     def is_dir(self):
         return stat.S_ISDIR(self.value)
+
+    def is_link(self):
+        return stat.S_ISLNK(self.value)
 
 
 class AbstractIRCommandPlugin(plugin.TypedProfileCommand,
@@ -313,11 +365,7 @@ class AbstractIRCommandPlugin(plugin.TypedProfileCommand,
     __abstract = True
 
     PROFILE_REQUIRED = False
-
-    @classmethod
-    def is_active(cls, session):
-        return (super(AbstractIRCommandPlugin, cls).is_active(session) and
-                session.GetParameter("live_mode") in ["API", "Memory"])
+    mode = "mode_live"
 
 
 class AbstractAPICommandPlugin(plugin.TypedProfileCommand,
@@ -331,14 +379,11 @@ class AbstractAPICommandPlugin(plugin.TypedProfileCommand,
     __abstract = True
 
     PROFILE_REQUIRED = False
-
-    @classmethod
-    def is_active(cls, session):
-        return (super(AbstractAPICommandPlugin, cls).is_active(session) and
-                session.GetParameter("live_mode") == "API")
+    mode = "mode_live_api"
 
 
 FILE_SPEC_DISPATCHER = dict(API=FileInformation)
+
 
 def FileFactory(filename, session=None):
     """Return the correct FileInformation class from the filename.
